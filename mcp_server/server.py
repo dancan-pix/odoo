@@ -2,6 +2,10 @@
 from mcp.server.fastmcp import FastMCP
 from adapter.odoo_rpc import OdooClient
 from adapter.receipts import ReceiptReader
+from adapter.qc_bridge import QCBridge
+from adapter.receipt_handoff import ReceiptHandoffService
+from adapter.release_plan import ReleasePlanner
+import os
 
 mcp = FastMCP("pixesci-odoo-erp")
 
@@ -34,6 +38,29 @@ def get_purchase_order_lines(purchase_order_id: int) -> list[dict]:
 def get_receipt_moves(picking_id: int) -> list[dict]:
     """Read item movements belonging to an incoming receipt."""
     return ReceiptReader(OdooClient.from_env()).receipt_moves(picking_id)
+
+@mcp.tool()
+def prepare_receipt_qc_handoff(picking_id: int, handoff_id: str, actor: str) -> dict:
+    """Prepare a local, idempotent QC request; does not create a PixeSci record."""
+    if os.environ.get("ERP_SANDBOX_ONLY", "").lower() != "true":
+        raise PermissionError("QC handoff preparation is sandbox-only")
+    bridge = QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3"))
+    return ReceiptHandoffService(OdooClient.from_env(), bridge).prepare(
+        picking_id, handoff_id, actor)
+
+@mcp.tool()
+def inspect_receipt_qc_handoff(handoff_id: str) -> dict:
+    """Inspect persisted handoff status; no quality disposition is inferred."""
+    bridge = QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3"))
+    return bridge.get(handoff_id) or {"found": False}
+
+@mcp.tool()
+def preview_qc_stock_release(handoff_id: str, hold_location_id: int,
+                             usable_location_id: int) -> dict:
+    """Read-only stock release eligibility; never executes a stock transfer."""
+    bridge = QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3"))
+    return ReleasePlanner(OdooClient.from_env(), bridge).inspect(
+        handoff_id, hold_location_id, usable_location_id)
 
 if __name__ == "__main__":
     mcp.run()
