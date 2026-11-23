@@ -97,11 +97,16 @@ class QualityRelease:
                 "origin": "PixeSci QA release " + key,
             }])
             for line in payload["move_quantities"]:
+                products = self.odoo.execute("product.product", "read",
+                    [line["product_id"]], fields=["uom_id"])
+                if len(products) != 1 or not products[0].get("uom_id"):
+                    raise ValueError("Odoo product unit of measure unavailable")
                 self.odoo.execute("stock.move", "create", [{
                     "name": "PixeSci QC release " + key,
                     "picking_id": picking_id,
                     "product_id": line["product_id"],
                     "product_uom_qty": line["quantity"],
+                    "product_uom": products[0]["uom_id"][0],
                     "location_id": payload["source_location_id"],
                     "location_dest_id": payload["destination_location_id"],
                 }])
