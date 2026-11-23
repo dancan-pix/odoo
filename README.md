@@ -5,7 +5,7 @@
 ## Local sandbox
 
 1. Copy `.env.example` to `.env` and replace placeholder credentials.
-2. Before deployment, set a strong Odoo database manager password in `config/odoo.conf`; never expose the database manager publicly.
+2. The database manager is disabled in the sandbox config. Provision the initial database using a controlled local administrative setup; do not expose database management publicly.
 3. Run `docker compose up -d`. Odoo is bound to local loopback on port 8069.
 4. Initialize an Odoo database locally and install Purchase and Inventory modules.
 5. Create a least-privilege integration user/API key; configure the Odoo environment variables.
