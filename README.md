@@ -1,7 +1,16 @@
 # PixeSci Odoo Community Integration
 
-Development repository for integrating Odoo Community ERP with PixeSci and PyxAI.
+**Development only.** PixeSci retains its laboratory/QC workflows; Odoo Community provides ERP capabilities. PyxAI coordinates governed actions.
 
-Initial repository bootstrap only. Subsequent implementation belongs on `feature/odoo-community-integration`.
+## Local sandbox
 
-No production deployment is authorized.
+1. Copy `.env.example` to `.env` and replace placeholder credentials.
+2. Before deployment, set a strong Odoo database manager password in `config/odoo.conf`; never expose the database manager publicly.
+3. Run `docker compose up -d`. Odoo is bound to local loopback on port 8069.
+4. Initialize an Odoo database locally and install Purchase and Inventory modules.
+5. Create a least-privilege integration user/API key; configure the Odoo environment variables.
+6. Install `pip install -r requirements.txt` and run `python -m mcp_server.server`.
+
+This is a development skeleton, not a validated regulated deployment. Backups, QC release writes and Railway deployment remain unimplemented. Never expose the current configuration to the public internet.
+
+See `docs/integration-contract.md` for workflow boundaries.
