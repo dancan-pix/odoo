@@ -1,7 +1,6 @@
 """Governed Odoo receiving workflow. No automatic stock release."""
 import json
 import os
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,7 +52,12 @@ class ERPWorkflow:
             raise NotImplementedError("Receipt validation requires QC hold-location mapping and QA evidence")
         else:
             raise ValueError("Unsupported action")
-        # Note: distributed execution safety requires a transactional outbox before production.
-        result = self.client.execute(model, method, [record_id])
+        if not self.ledger.claim_execution(key, executor):
+            raise PermissionError("Action already claimed or approval revoked")
+        try:
+            result = self.client.execute(model, method, [record_id])
+        except Exception:
+            self.ledger.mark_uncertain(key)
+            raise RuntimeError("Remote outcome uncertain; manual reconciliation required before retry") from None
         self.ledger.mark_executed(key, executor)
         return {"idempotency_key": key, "status": "executed", "result": result}
