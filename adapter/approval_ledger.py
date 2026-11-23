@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS actions (
     idempotency_key TEXT PRIMARY KEY,
     action TEXT NOT NULL,
     payload_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('proposed','approved','executed','rejected')),
+    status TEXT NOT NULL CHECK(status IN ('proposed','approved','executing','executed','rejected','uncertain')),
     requested_by TEXT NOT NULL,
     approved_by TEXT,
     created_at TEXT NOT NULL,
@@ -41,3 +41,23 @@ class ApprovalLedger:
             db.row_factory = sqlite3.Row
             row = db.execute("SELECT * FROM actions WHERE idempotency_key=?", (key,)).fetchone()
             return dict(row) if row else None
+
+    def claim_execution(self, key: str, executor: str) -> bool:
+        """Atomically claim action; never retry uncertain remote writes automatically."""
+        with sqlite3.connect(self.path) as db:
+            return db.execute(
+                "UPDATE actions SET status='executing' WHERE idempotency_key=? AND status='approved' AND requested_by<>? AND approved_by<>?",
+                (key, executor, executor)).rowcount == 1
+
+    def mark_executed(self, key: str, executor: str) -> bool:
+        with sqlite3.connect(self.path) as db:
+            return db.execute(
+                "UPDATE actions SET status='executed', executed_at=? WHERE idempotency_key=? AND status='executing'",
+                (datetime.now(timezone.utc).isoformat(), key)).rowcount == 1
+
+    def mark_uncertain(self, key: str) -> bool:
+        """Remote RPC may have succeeded; require manual reconciliation before any retry."""
+        with sqlite3.connect(self.path) as db:
+            return db.execute(
+                "UPDATE actions SET status='uncertain' WHERE idempotency_key=? AND status='executing'",
+                (key,)).rowcount == 1
