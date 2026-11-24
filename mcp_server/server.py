@@ -62,5 +62,20 @@ def preview_qc_stock_release(handoff_id: str, hold_location_id: int,
     return ReleasePlanner(OdooClient.from_env(), bridge).inspect(
         handoff_id, hold_location_id, usable_location_id)
 
+
+@mcp.tool()
+def reconcile_stock_release(idempotency_key: str) -> dict:
+    """Read-only inspection of an Odoo transfer after an uncertain release write.
+
+    Does not retry, approve, validate or move stock. Returns mismatch/ambiguity
+    explicitly for human reconciliation.
+    """
+    from adapter.approval_ledger import ApprovalLedger
+    from adapter.stock_reconciliation import StockTransferReconciler
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise ValueError("A valid idempotency key is required")
+    ledger = ApprovalLedger(os.environ.get("ERP_APPROVAL_DB_PATH", "erp-approvals.sqlite3"))
+    return StockTransferReconciler(OdooClient.from_env(), ledger).inspect(idempotency_key)
+
 if __name__ == "__main__":
     mcp.run()
