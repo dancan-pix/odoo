@@ -1,0 +1,57 @@
+# Run from repository root:
+# docker compose -f compose.yaml -f deploy/compose.integration.yaml --profile integration up -d
+# Supply separate scoped Odoo accounts and private principal file before startup.
+x-integration: &integration
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile.integration
+  profiles: [integration]
+  restart: unless-stopped
+  depends_on:
+    odoo:
+      condition: service_started
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  init: true
+  environment: &common-env
+    ODOO_URL: http://odoo:8069
+    ODOO_DB: ${ODOO_DB:?Set ODOO_DB}
+    ERP_SANDBOX_ONLY: "true"
+    PYTHONDONTWRITEBYTECODE: "1"
+services:
+  erp-read:
+    <<: *integration
+    command: ["uvicorn", "mcp_server.http_readonly:create_app", "--factory", "--host", "0.0.0.0", "--port", "8765", "--no-proxy-headers"]
+    environment:
+      <<: *common-env
+      ODOO_USER: ${ERP_READ_ODOO_USER:?Set read-only Odoo user}
+      ODOO_API_KEY: ${ERP_READ_ODOO_KEY:?Set read-only Odoo key}
+      ERP_MCP_READ_TOKEN: ${ERP_MCP_READ_TOKEN:?Set read token}
+    ports:
+      - "127.0.0.1:8765:8765"
+  erp-purchasing:
+    <<: *integration
+    command: ["uvicorn", "mcp_server.http_purchasing:create_app", "--factory", "--host", "0.0.0.0", "--port", "8766", "--no-proxy-headers"]
+    environment:
+      <<: *common-env
+      ODOO_USER: ${ERP_PURCHASE_ODOO_USER:?Set purchasing Odoo user}
+      ODOO_API_KEY: ${ERP_PURCHASE_ODOO_KEY:?Set purchasing Odoo key}
+      ERP_APPROVAL_DB_PATH: /state/approvals.sqlite3
+      ERP_MCP_PRINCIPALS_FILE: /run/secrets/purchase_principals
+      ERP_COMPANY_ID: ${ERP_COMPANY_ID:?Set company ID}
+      ERP_WRITE_ENABLED: "true"
+    secrets:
+      - purchase_principals
+    volumes:
+      - integration_state:/state
+    ports:
+      - "127.0.0.1:8766:8766"
+secrets:
+  purchase_principals:
+    file: ${ERP_MCP_PRINCIPALS_FILE:?Set private principal file path}
+volumes:
+  integration_state:
