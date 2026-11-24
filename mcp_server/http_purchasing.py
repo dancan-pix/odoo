@@ -38,6 +38,14 @@ def checked_key(key):
     return key
 
 @mcp.tool()
+def propose_purchase_creation(supplier_id: int, lines: list[dict], idempotency_key: str) -> dict:
+    """Propose a draft RFQ. Lines require product_id, quantity, unit_price and date_planned (UTC YYYY-MM-DD HH:MM:SS)."""
+    actor = actor_for("requester")
+    if supplier_id <= 0:
+        raise ValueError("Invalid supplier ID")
+    return service().propose_create(supplier_id, lines, actor, checked_key(idempotency_key))
+
+@mcp.tool()
 def propose_purchase(order_id: int, operation: str, idempotency_key: str) -> dict:
     """Propose confirmation or cancellation of an existing unconfirmed RFQ."""
     actor = actor_for("requester")
