@@ -11,6 +11,7 @@ from adapter.approval_ledger import ApprovalLedger
 from adapter.qc_bridge import QCBridge
 from adapter.release_plan import ReleasePlanner
 from adapter.odoo_rpc import OdooClient
+from adapter.stock_execution import complete_untracked_transfer, preflight_release
 
 
 @dataclass
@@ -80,39 +81,18 @@ class QualityRelease:
                    "quantity": m["quantity"]} for m in fresh["moves"]]
         if actual != payload["move_quantities"]:
             raise PermissionError("Odoo receipt movements changed since approval")
+        if not executor.strip():
+            raise ValueError("Executor required")
+        preflight_release(self.odoo, payload)
         if not self.ledger.claim_execution(key, executor):
             raise PermissionError("Execution claim failed or separation of duties violated")
         # A remote call may succeed even when the connection times out. Never auto-retry.
         try:
-            # Create a DRAFT internal transfer only. Odoo stock is not released
-            # until its separate stock validation/approval process completes.
-            picking_types = self.odoo.execute("stock.picking.type", "search_read",
-                [[["code", "=", "internal"]]], fields=["id"], limit=2)
-            if len(picking_types) != 1:
-                raise ValueError("Exactly one configured internal picking type required")
-            picking_id = self.odoo.execute("stock.picking", "create", [{
-                "picking_type_id": picking_types[0]["id"],
-                "location_id": payload["source_location_id"],
-                "location_dest_id": payload["destination_location_id"],
-                "origin": "PixeSci QA release " + key,
-            }])
-            for line in payload["move_quantities"]:
-                products = self.odoo.execute("product.product", "read",
-                    [line["product_id"]], fields=["uom_id"])
-                if len(products) != 1 or not products[0].get("uom_id"):
-                    raise ValueError("Odoo product unit of measure unavailable")
-                self.odoo.execute("stock.move", "create", [{
-                    "name": "PixeSci QC release " + key,
-                    "picking_id": picking_id,
-                    "product_id": line["product_id"],
-                    "product_uom_qty": line["quantity"],
-                    "product_uom": products[0]["uom_id"][0],
-                    "location_id": payload["source_location_id"],
-                    "location_dest_id": payload["destination_location_id"],
-                }])
-            self.ledger.mark_executed(key, executor)
-            return {"status": "draft_transfer_created", "picking_id": picking_id,
-                    "inventory_moved": False, "requires_odoo_validation": True}
+            picking_id = complete_untracked_transfer(self.odoo, payload, key)
+            if not self.ledger.mark_executed(key, executor):
+                raise RuntimeError("Could not persist completed transfer")
+            return {"status": "executed", "picking_id": picking_id,
+                    "inventory_moved": True, "requires_odoo_validation": False}
         except Exception:
             self.ledger.mark_uncertain(key)
             raise
