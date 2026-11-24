@@ -1,5 +1,6 @@
 """SQLite-backed approval and idempotency ledger for proposed ERP actions."""
 import sqlite3
+import json
 from datetime import datetime, timezone
 
 SCHEMA = """
@@ -12,6 +13,15 @@ CREATE TABLE IF NOT EXISTS actions (
     approved_by TEXT,
     created_at TEXT NOT NULL,
     executed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS stock_release_claims (
+    receipt_id INTEGER PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE REFERENCES actions(idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS execution_audit (
+    idempotency_key TEXT PRIMARY KEY REFERENCES actions(idempotency_key),
+    executor TEXT NOT NULL,
+    claimed_at TEXT NOT NULL
 );
 """
 
@@ -44,16 +54,33 @@ class ApprovalLedger:
 
     def claim_execution(self, key: str, executor: str) -> bool:
         """Atomically claim action; never retry uncertain remote writes automatically."""
+        if not executor.strip():
+            raise ValueError("Executor required")
         with sqlite3.connect(self.path) as db:
-            return db.execute(
-                "UPDATE actions SET status='executing' WHERE idempotency_key=? AND status='approved' AND requested_by<>? AND approved_by<>?",
-                (key, executor, executor)).rowcount == 1
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT action,payload_json FROM actions WHERE idempotency_key=? AND status='approved' AND requested_by<>? AND approved_by<>?",
+                             (key, executor, executor)).fetchone()
+            if not row:
+                return False
+            if row[0] == "qc_stock_release":
+                receipt = json.loads(row[1])["picking_id"]
+                if type(receipt) is not int or receipt <= 0:
+                    raise ValueError("Invalid receipt identity")
+                # Backward compatibility: protect receipts executed before this migration.
+                prior = db.execute("SELECT payload_json FROM actions WHERE action='qc_stock_release' AND status IN ('executing','executed','uncertain')").fetchall()
+                if any(json.loads(item[0])["picking_id"] == receipt for item in prior):
+                    return False
+                if db.execute("INSERT OR IGNORE INTO stock_release_claims VALUES (?,?)", (receipt, key)).rowcount != 1:
+                    return False
+            db.execute("INSERT INTO execution_audit VALUES (?,?,?)",
+                       (key, executor, datetime.now(timezone.utc).isoformat()))
+            return db.execute("UPDATE actions SET status='executing' WHERE idempotency_key=? AND status='approved'", (key,)).rowcount == 1
 
     def mark_executed(self, key: str, executor: str) -> bool:
         with sqlite3.connect(self.path) as db:
             return db.execute(
-                "UPDATE actions SET status='executed', executed_at=? WHERE idempotency_key=? AND status='executing'",
-                (datetime.now(timezone.utc).isoformat(), key)).rowcount == 1
+                "UPDATE actions SET status='executed', executed_at=? WHERE idempotency_key=? AND status='executing' AND EXISTS (SELECT 1 FROM execution_audit WHERE idempotency_key=actions.idempotency_key AND executor=?)",
+                (datetime.now(timezone.utc).isoformat(), key, executor)).rowcount == 1
 
     def mark_uncertain(self, key: str) -> bool:
         """Remote RPC may have succeeded; require manual reconciliation before any retry."""
