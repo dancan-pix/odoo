@@ -1,6 +1,4 @@
-"""Odoo 18 sandbox release execution for untracked products only.
-
-Tracked lots/serials require a separate exact lot allocation contract.
+"""Odoo 18 sandbox release execution with exact receipt allocation checks.
 No wizard is automatically accepted and uncertain writes are never retried.
 """
 import math
@@ -33,14 +31,18 @@ def preflight_release(odoo, payload):
     for line in payload["move_quantities"]:
         products = odoo.execute("product.product", "read", [[line["product_id"]]],
                                 fields=["tracking", "uom_id"])
-        if len(products) != 1 or products[0]["tracking"] != "none":
-            raise PermissionError("Lot/serial-tracked release is not supported")
+        if len(products) != 1 or products[0]["tracking"] not in ("none", "lot", "serial"):
+            raise PermissionError("Unknown product tracking")
+        if products[0]["tracking"] != "none" and not payload.get("allocations"):
+            raise PermissionError("Tracked release requires approved allocations")
         receipt = odoo.execute("stock.move", "read", [[line["move_id"]]],
                                fields=["product_uom", "product_id", "quantity", "state"])
         if len(receipt) != 1 or receipt[0]["state"] != "done" or receipt[0]["product_id"][0] != line["product_id"] or not _same(receipt[0]["quantity"], line["quantity"]):
             raise PermissionError("Receipt move changed")
         if receipt[0]["product_uom"][0] != products[0]["uom_id"][0]:
             raise PermissionError("Receipt UOM conversion is not supported")
+    if payload.get("allocations"):
+        expected_allocations(payload)
     return picking_type, company
 
 
@@ -79,7 +81,9 @@ def complete_untracked_transfer(odoo, payload, key):
         raise RuntimeError("Reserved quantities differ from approved quantities")
     lines = odoo.execute("stock.move.line", "search_read", [[["picking_id", "=", picking]]],
                          fields=["location_id", "location_dest_id", "lot_id", "owner_id", "package_id", "result_package_id"], limit=1000)
-    if not lines or len(lines) >= 1000 or any(
+    if payload.get("allocations"):
+        verify_transfer_allocations(odoo, picking, payload)
+    elif not lines or len(lines) >= 1000 or any(
         x["location_id"][0] != source or x["location_dest_id"][0] != dest or
         x["lot_id"] or x["owner_id"] or x["package_id"] or x["result_package_id"] for x in lines):
         raise RuntimeError("Unexpected reservation allocation")
@@ -99,4 +103,52 @@ def complete_untracked_transfer(odoo, payload, key):
         totals[move["product_id"][0]] += move["quantity"]
     if totals.keys() != expected.keys() or any(not _same(totals[k], expected[k]) for k in expected):
         raise RuntimeError("Completed quantities differ from approval")
+    if payload.get("allocations"):
+        verify_transfer_allocations(odoo, picking, payload)
     return picking
+
+
+def expected_allocations(payload):
+    """Canonical product/lot/UOM totals from the approved receipt snapshot."""
+    totals = Counter()
+    by_product = Counter()
+    seen = set()
+    for line in payload["allocations"]:
+        quantity = line["quantity"]
+        if (not math.isfinite(quantity) or quantity <= 0 or
+                line["destination_location_id"] != payload["source_location_id"] or
+                line["move_line_id"] in seen):
+            raise PermissionError("Invalid approved allocation")
+        seen.add(line["move_line_id"])
+        totals[(line["product_id"], line["lot_id"], line["uom_id"])] += quantity
+        by_product[line["product_id"]] += quantity
+    expected = Counter()
+    for move in payload["move_quantities"]:
+        expected[move["product_id"]] += move["quantity"]
+    if expected.keys() != by_product.keys() or any(
+            not _same(expected[k], by_product[k]) for k in expected):
+        raise PermissionError("Approved allocation totals differ from receipt")
+    return totals
+
+
+def verify_transfer_allocations(odoo, picking, payload):
+    expected = expected_allocations(payload)
+    rows = odoo.execute("stock.move.line", "search_read",
+        [[["picking_id", "=", picking]]],
+        fields=["product_id", "lot_id", "product_uom_id", "quantity",
+                "location_id", "location_dest_id", "owner_id", "package_id",
+                "result_package_id"], limit=1001)
+    if not rows or len(rows) > 1000:
+        raise RuntimeError("Missing or excessive transfer allocations")
+    actual = Counter()
+    for row in rows:
+        if (row["location_id"][0] != payload["source_location_id"] or
+                row["location_dest_id"][0] != payload["destination_location_id"] or
+                row["owner_id"] or row["package_id"] or row["result_package_id"] or
+                not math.isfinite(row["quantity"]) or row["quantity"] <= 0):
+            raise RuntimeError("Unexpected transfer allocation")
+        actual[(row["product_id"][0], row["lot_id"][0] if row["lot_id"] else None,
+                row["product_uom_id"][0])] += row["quantity"]
+    if actual.keys() != expected.keys() or any(
+            not _same(actual[k], expected[k]) for k in expected):
+        raise RuntimeError("Transfer allocation differs from QA-approved batches")
