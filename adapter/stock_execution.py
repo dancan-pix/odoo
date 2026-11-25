@@ -69,7 +69,10 @@ def complete_untracked_transfer(odoo, payload, key):
             "location_dest_id": dest,
         }])
     odoo.execute("stock.picking", "action_confirm", [picking])
-    odoo.execute("stock.picking", "action_assign", [picking])
+    if any(a["lot_id"] for a in payload.get("allocations", [])):
+        reserve_approved_allocations(odoo, picking, payload, company)
+    else:
+        odoo.execute("stock.picking", "action_assign", [picking])
     moves = odoo.execute("stock.move", "search_read", [[["picking_id", "=", picking]]],
                          fields=["id", "product_id", "quantity", "product_uom_qty", "state"], limit=1000)
     actual = Counter()
@@ -152,3 +155,68 @@ def verify_transfer_allocations(odoo, picking, payload):
     if actual.keys() != expected.keys() or any(
             not _same(actual[k], expected[k]) for k in expected):
         raise RuntimeError("Transfer allocation differs from QA-approved batches")
+
+
+def reserve_approved_allocations(odoo, picking, payload, company):
+    """Use explicit Odoo 18 move lines instead of FIFO lot selection.
+
+    The stock.move.line ORM manages quant reservations. Never write quant
+    reserved_quantity directly. Any failure leaves the picking for reconciliation.
+    """
+    expected = expected_allocations(payload)
+    source = payload["source_location_id"]
+    dest = payload["destination_location_id"]
+    # Confirmation can reserve automatically depending on the operation type.
+    odoo.execute("stock.picking", "do_unreserve", [picking])
+    existing = odoo.execute("stock.move.line", "search",
+                            [[["picking_id", "=", picking]]], limit=1)
+    if existing:
+        raise RuntimeError("Automatic reservation was not fully removed")
+    moves = odoo.execute("stock.move", "search_read",
+        [[["picking_id", "=", picking]]],
+        fields=["id", "product_id", "product_uom", "product_uom_qty", "state"],
+        limit=1001)
+    if not moves or len(moves) > 1000:
+        raise RuntimeError("Missing or excessive release moves")
+    remaining = dict(expected)
+    values = []
+    for move in moves:
+        if move["state"] not in ("confirmed", "waiting", "partially_available"):
+            raise RuntimeError("Unexpected move state after unreservation")
+        product = move["product_id"][0]
+        uom = move["product_uom"][0]
+        need = float(move["product_uom_qty"])
+        for allocation, available in list(remaining.items()):
+            p, lot, unit = allocation
+            if p != product or unit != uom or available <= 0 or _same(need, 0):
+                continue
+            quantity = min(need, available)
+            values.append({
+                "picking_id": picking, "move_id": move["id"],
+                "company_id": company, "product_id": product,
+                "product_uom_id": uom, "lot_id": lot or False,
+                "location_id": source, "location_dest_id": dest,
+                "quantity": quantity,
+            })
+            remaining[allocation] -= quantity
+            need -= quantity
+        if not _same(need, 0):
+            raise RuntimeError("Approved allocations cannot fill release move")
+    if any(not _same(q, 0) for q in remaining.values()):
+        raise RuntimeError("Approved allocations exceed release demand")
+    # Reject insufficient, packaged or third-party stock before creating lines.
+    for (product, lot, uom), quantity in expected.items():
+        domain = [["product_id", "=", product], ["location_id", "=", source],
+                  ["lot_id", "=", lot or False], ["company_id", "=", company],
+                  ["owner_id", "=", False], ["package_id", "=", False]]
+        quants = odoo.execute("stock.quant", "search_read", [domain],
+            fields=["quantity", "reserved_quantity"], limit=1001)
+        if len(quants) > 1000:
+            raise RuntimeError("Excessive quant records")
+        free = sum(q["quantity"] - q["reserved_quantity"] for q in quants)
+        if not math.isfinite(free) or (free < quantity and not _same(free, quantity)):
+            raise RuntimeError("Insufficient free stock in authorized batch")
+    if not values:
+        raise RuntimeError("No approved move lines")
+    odoo.execute("stock.move.line", "create", [values])
+    verify_transfer_allocations(odoo, picking, payload)
