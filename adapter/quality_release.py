@@ -5,11 +5,13 @@ This adapter does not accept caller-provided QA approval flags. A verifier must
 query the authoritative PixeSci service and independently authenticate its result.
 """
 import json
+import hashlib
 import os
 from dataclasses import dataclass
 from adapter.approval_ledger import ApprovalLedger
 from adapter.qc_bridge import QCBridge
 from adapter.release_plan import ReleasePlanner
+from adapter.receipt_handoff import ReceiptHandoffService
 from adapter.odoo_rpc import OdooClient
 from adapter.stock_execution import complete_untracked_transfer, preflight_release
 
@@ -20,6 +22,25 @@ class QualityRelease:
     bridge: QCBridge
     ledger: ApprovalLedger
     verify_pixescis_qa: object
+
+    def _verified_receipt(self, handoff: dict, actor: str) -> str:
+        if not handoff or handoff.get("state") != "approved":
+            raise PermissionError("Approved QC handoff required")
+        digest = hashlib.sha256(handoff["payload_json"].encode("utf-8")).hexdigest()
+        disposition = json.loads(handoff.get("disposition_json") or "{}")
+        if (disposition.get("decision") != "approved" or
+                disposition.get("receipt_sha256") != digest or
+                disposition.get("request_id") != handoff.get("pixesci_request_id")):
+            raise PermissionError("QA approval is not bound to this receipt")
+        snapshot = json.loads(handoff["payload_json"])
+        if not snapshot.get("lines") or any(not line.get("allocations") for line in snapshot["lines"]):
+            raise PermissionError("Batch allocation evidence required")
+        # Re-read Odoo evidence; prepare is idempotent and rejects changed snapshots.
+        current = ReceiptHandoffService(self.odoo, self.bridge).prepare(
+            snapshot["picking_id"], handoff["handoff_id"], actor)
+        if current.get("receipt_sha256") != digest:
+            raise PermissionError("Receipt evidence changed since QA approval")
+        return digest
 
     def propose(self, handoff_id: str, source_location_id: int,
                 destination_location_id: int, actor: str, key: str) -> dict:
@@ -34,12 +55,14 @@ class QualityRelease:
             raise PermissionError("PixeSci QC request must be linked")
         if not self.verify_pixescis_qa(handoff["pixesci_request_id"]):
             raise PermissionError("Authoritative PixeSci QA release verification failed")
+        receipt_digest = self._verified_receipt(handoff, actor)
         moves = plan["moves"]
         if any(not isinstance(m.get("quantity"), (int, float)) or
                isinstance(m.get("quantity"), bool) or m["quantity"] <= 0 for m in moves):
             raise ValueError("Receipt movements must have positive completed quantities")
         payload = {
             "handoff_id": handoff_id,
+            "receipt_sha256": receipt_digest,
             "pixesci_request_id": handoff["pixesci_request_id"],
             "picking_id": json.loads(handoff["payload_json"])["picking_id"],
             "source_location_id": source_location_id,
@@ -77,6 +100,8 @@ class QualityRelease:
         if not handoff or handoff["pixesci_request_id"] != payload["pixesci_request_id"] or (
             not self.verify_pixescis_qa(handoff["pixesci_request_id"])):
             raise PermissionError("Current PixeSci QA authorization could not be verified")
+        if self._verified_receipt(handoff, executor) != payload.get("receipt_sha256"):
+            raise PermissionError("Release proposal is not bound to current QA receipt evidence")
         actual = [{"move_id": m["id"], "product_id": m["product_id"][0],
                    "quantity": m["quantity"]} for m in fresh["moves"]]
         if actual != payload["move_quantities"]:
