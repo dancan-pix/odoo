@@ -4,6 +4,7 @@ This module stores an outbox for a future authenticated PixeSci API integration.
 It never fabricates QC approval or moves inventory.
 """
 import json
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -65,6 +66,7 @@ class QCBridge:
             if row["handoff_id"] != handoff_id or row["payload_json"] != payload:
                 raise ValueError("Conflicting handoff or receipt already exists")
             return {"handoff_id": handoff_id, "state": row["state"],
+                    "receipt_sha256": hashlib.sha256(row["payload_json"].encode("utf-8")).hexdigest(),
                     "payload": json.loads(row["payload_json"])}
 
     def acknowledge_submission(self, handoff_id: str, pixesci_request_id: str) -> bool:
@@ -93,6 +95,13 @@ class QCBridge:
         row = self.get(handoff_id)
         if not row or row["state"] not in ("submitted", "under_review"):
             raise ValueError("Handoff is not awaiting QC disposition")
+        # Bind the authoritative disposition to the immutable receipt snapshot.
+        # Legacy approvals without this binding must not authorize stock release.
+        expected_digest = hashlib.sha256(row["payload_json"].encode("utf-8")).hexdigest()
+        if disposition.get("receipt_sha256") != expected_digest:
+            raise PermissionError("QA disposition does not identify the exact receipt snapshot")
+        if disposition.get("request_id") != row["pixesci_request_id"]:
+            raise PermissionError("QA disposition request identity mismatch")
         if not verifier(row["pixesci_request_id"], disposition):
             raise PermissionError("PixeSci QA evidence verification failed")
         with sqlite3.connect(self.path) as db:
