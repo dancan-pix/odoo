@@ -1,4 +1,4 @@
-"""Read-only PyxAI MCP bridge. Install 'mcp' and set Odoo credentials to run."""
+"""Standalone scoped Odoo MCP service; synthetic QA is opt-in only."""
 from mcp.server.fastmcp import FastMCP
 from adapter.odoo_rpc import OdooClient
 from adapter.receipts import ReceiptReader
@@ -32,12 +32,13 @@ def principal(ctx: Context, scope: str) -> str:
     raise PermissionError("ERP scope denied")
 
 def release_service():
-    # No live QA endpoint is configured in this standalone implementation.
-    # Never infer authoritative approval from the local ledger.
+    from adapter.sandbox_qa import Client, enabled
+    verifier = Client().verify if enabled() else lambda request_id: False
+    # No real QA authority is configured; default remains fail closed.
     return QualityRelease(OdooClient.from_env(),
         QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3")),
         ApprovalLedger(os.environ.get("ERP_APPROVAL_DB_PATH", "erp-approvals.sqlite3")),
-        lambda request_id: False)
+        verifier)
 
 @mcp.tool()
 def propose_stock_release(handoff_id: str, source_location_id: int,
@@ -62,33 +63,39 @@ def execute_stock_release(idempotency_key: str, ctx: Context) -> dict:
 
 
 @mcp.tool()
-def list_suppliers(limit: int = 25) -> list[dict]:
+def list_suppliers(ctx: Context, limit: int = 25) -> list[dict]:
     """List Odoo suppliers. Read-only; no stock or purchase changes."""
+    principal(ctx, "suppliers:read")
     return OdooClient.from_env().suppliers(limit)
 
 @mcp.tool()
-def list_purchase_orders(limit: int = 25) -> list[dict]:
+def list_purchase_orders(ctx: Context, limit: int = 25) -> list[dict]:
     """List purchase orders with their Odoo states."""
+    principal(ctx, "purchase:read")
     return OdooClient.from_env().purchase_orders(limit)
 
 @mcp.tool()
-def list_stock_quantities(limit: int = 25) -> list[dict]:
+def list_stock_quantities(ctx: Context, limit: int = 25) -> list[dict]:
     """Inspect inventory quantities without changing stock."""
+    principal(ctx, "stock:read")
     return OdooClient.from_env().stock_quantities(limit)
 
 @mcp.tool()
-def list_incoming_receipts(limit: int = 25) -> list[dict]:
+def list_incoming_receipts(ctx: Context, limit: int = 25) -> list[dict]:
     """List incoming receipts and their current Odoo state."""
+    principal(ctx, "receipts:read")
     return ReceiptReader(OdooClient.from_env()).incoming_receipts(limit)
 
 @mcp.tool()
-def get_purchase_order_lines(purchase_order_id: int) -> list[dict]:
+def get_purchase_order_lines(purchase_order_id: int, ctx: Context) -> list[dict]:
     """Read ordered and received quantities for a purchase order."""
+    principal(ctx, "purchase:read")
     return ReceiptReader(OdooClient.from_env()).purchase_lines(purchase_order_id)
 
 @mcp.tool()
-def get_receipt_moves(picking_id: int) -> list[dict]:
+def get_receipt_moves(picking_id: int, ctx: Context) -> list[dict]:
     """Read item movements belonging to an incoming receipt."""
+    principal(ctx, "receipts:read")
     return ReceiptReader(OdooClient.from_env()).receipt_moves(picking_id)
 
 @mcp.tool()
@@ -102,27 +109,38 @@ def prepare_receipt_qc_handoff(picking_id: int, handoff_id: str, ctx: Context) -
         picking_id, handoff_id, actor)
 
 @mcp.tool()
-def inspect_receipt_qc_handoff(handoff_id: str) -> dict:
+def sync_synthetic_qa(handoff_id: str, ctx: Context) -> dict:
+    """Submit or refresh receipt evidence with the isolated synthetic QA authority."""
+    actor = principal(ctx, "qc:sync")
+    from adapter.sandbox_qa import Client
+    bridge = QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3"))
+    return Client().sync(bridge, handoff_id, actor)
+
+@mcp.tool()
+def inspect_receipt_qc_handoff(handoff_id: str, ctx: Context) -> dict:
     """Inspect persisted handoff status; no quality disposition is inferred."""
+    principal(ctx, "qc:read")
     bridge = QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3"))
     return bridge.get(handoff_id) or {"found": False}
 
 @mcp.tool()
 def preview_qc_stock_release(handoff_id: str, hold_location_id: int,
-                             usable_location_id: int) -> dict:
+                             usable_location_id: int, ctx: Context) -> dict:
     """Read-only stock release eligibility; never executes a stock transfer."""
+    principal(ctx, "stock:read")
     bridge = QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3"))
     return ReleasePlanner(OdooClient.from_env(), bridge).inspect(
         handoff_id, hold_location_id, usable_location_id)
 
 
 @mcp.tool()
-def reconcile_stock_release(idempotency_key: str) -> dict:
+def reconcile_stock_release(idempotency_key: str, ctx: Context) -> dict:
     """Read-only inspection of an Odoo transfer after an uncertain release write.
 
     Does not retry, approve, validate or move stock. Returns mismatch/ambiguity
     explicitly for human reconciliation.
     """
+    principal(ctx, "stock:read")
     from adapter.approval_ledger import ApprovalLedger
     from adapter.stock_reconciliation import StockTransferReconciler
     if not idempotency_key or len(idempotency_key) > 128:
