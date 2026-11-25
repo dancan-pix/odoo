@@ -67,6 +67,8 @@ class QualityRelease:
             "picking_id": json.loads(handoff["payload_json"])["picking_id"],
             "source_location_id": source_location_id,
             "destination_location_id": destination_location_id,
+            "allocations": [allocation for line in json.loads(handoff["payload_json"])["lines"]
+                            for allocation in line["allocations"]],
             "move_quantities": [{"move_id": m["id"], "product_id": m["product_id"][0],
                                  "quantity": m["quantity"]} for m in moves],
         }
@@ -102,6 +104,10 @@ class QualityRelease:
             raise PermissionError("Current PixeSci QA authorization could not be verified")
         if self._verified_receipt(handoff, executor) != payload.get("receipt_sha256"):
             raise PermissionError("Release proposal is not bound to current QA receipt evidence")
+        allocations = [allocation for line in json.loads(handoff["payload_json"])["lines"]
+                       for allocation in line["allocations"]]
+        if payload.get("allocations") != allocations:
+            raise PermissionError("Release proposal lacks exact approved allocations")
         actual = [{"move_id": m["id"], "product_id": m["product_id"][0],
                    "quantity": m["quantity"]} for m in fresh["moves"]]
         if actual != payload["move_quantities"]:
