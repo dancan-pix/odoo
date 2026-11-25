@@ -6,8 +6,60 @@ from adapter.qc_bridge import QCBridge
 from adapter.receipt_handoff import ReceiptHandoffService
 from adapter.release_plan import ReleasePlanner
 import os
+import json
+import hashlib
+import hmac
+from mcp.server.fastmcp import Context
+from adapter.quality_release import QualityRelease
+from adapter.approval_ledger import ApprovalLedger
 
 mcp = FastMCP("pixesci-odoo-erp")
+
+def principal(ctx: Context, scope: str) -> str:
+    """Authenticate per HTTP request; stdio cannot perform governed writes."""
+    request = ctx.request_context.request
+    headers = getattr(request, "headers", {})
+    auth = headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise PermissionError("Authenticated ERP principal required")
+    digest = hashlib.sha256(auth[7:].encode()).hexdigest()
+    records = json.loads(os.environ.get("ERP_MCP_PRINCIPALS_JSON", "{}"))
+    for expected, record in records.items():
+        if hmac.compare_digest(expected, digest):
+            actor = record.get("actor")
+            if isinstance(actor, str) and actor.strip() and scope in record.get("scopes", []):
+                return actor
+    raise PermissionError("ERP scope denied")
+
+def release_service():
+    # No live QA endpoint is configured in this standalone implementation.
+    # Never infer authoritative approval from the local ledger.
+    return QualityRelease(OdooClient.from_env(),
+        QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3")),
+        ApprovalLedger(os.environ.get("ERP_APPROVAL_DB_PATH", "erp-approvals.sqlite3")),
+        lambda request_id: False)
+
+@mcp.tool()
+def propose_stock_release(handoff_id: str, source_location_id: int,
+                           destination_location_id: int, idempotency_key: str,
+                           ctx: Context) -> dict:
+    """Propose an exact QA-authorized release; requires independent approval."""
+    actor = principal(ctx, "stock:propose")
+    return release_service().propose(handoff_id, source_location_id,
+        destination_location_id, actor, idempotency_key)
+
+@mcp.tool()
+def approve_stock_release(idempotency_key: str, ctx: Context) -> bool:
+    """Independently approve an existing stock release proposal."""
+    actor = principal(ctx, "stock:approve")
+    return release_service().approve(idempotency_key, actor)
+
+@mcp.tool()
+def execute_stock_release(idempotency_key: str, ctx: Context) -> dict:
+    """Execute a previously approved release, subject to current external QA."""
+    actor = principal(ctx, "stock:execute")
+    return release_service().execute(idempotency_key, actor)
+
 
 @mcp.tool()
 def list_suppliers(limit: int = 25) -> list[dict]:
@@ -40,10 +92,11 @@ def get_receipt_moves(picking_id: int) -> list[dict]:
     return ReceiptReader(OdooClient.from_env()).receipt_moves(picking_id)
 
 @mcp.tool()
-def prepare_receipt_qc_handoff(picking_id: int, handoff_id: str, actor: str) -> dict:
+def prepare_receipt_qc_handoff(picking_id: int, handoff_id: str, ctx: Context) -> dict:
     """Prepare a local, idempotent QC request; does not create a PixeSci record."""
     if os.environ.get("ERP_SANDBOX_ONLY", "").lower() != "true":
         raise PermissionError("QC handoff preparation is sandbox-only")
+    actor = principal(ctx, "qc:prepare")
     bridge = QCBridge(os.environ.get("ERP_QC_DB_PATH", "erp-qc.sqlite3"))
     return ReceiptHandoffService(OdooClient.from_env(), bridge).prepare(
         picking_id, handoff_id, actor)
@@ -78,4 +131,4 @@ def reconcile_stock_release(idempotency_key: str) -> dict:
     return StockTransferReconciler(OdooClient.from_env(), ledger).inspect(idempotency_key)
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="streamable-http" if os.environ.get("ERP_MCP_HTTP") == "true" else "stdio")
