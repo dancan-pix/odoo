@@ -175,5 +175,32 @@ def reconcile_purchase_confirmation(idempotency_key: str, ctx: Context) -> dict:
     principal(ctx, "purchase:read")
     return purchase_service().reconcile(idempotency_key)
 
+
+def supplier_service():
+    from adapter.supplier_creation import SupplierCreation
+    return SupplierCreation(OdooClient.from_env(),
+        ApprovalLedger(os.environ.get("ERP_APPROVAL_DB_PATH", "erp-approvals.sqlite3")))
+
+@mcp.tool()
+def propose_supplier_creation(name: str, email: str, idempotency_key: str, ctx: Context) -> dict:
+    """Propose a new supplier for independent approval."""
+    return supplier_service().propose(name, email, idempotency_key, principal(ctx, "suppliers:propose"))
+
+@mcp.tool()
+def approve_supplier_creation(idempotency_key: str, ctx: Context) -> bool:
+    """Approve supplier creation independently."""
+    return supplier_service().approve(idempotency_key, principal(ctx, "suppliers:approve"))
+
+@mcp.tool()
+def execute_supplier_creation(idempotency_key: str, ctx: Context) -> dict:
+    """Create an approved supplier in the sandbox."""
+    return supplier_service().execute(idempotency_key, principal(ctx, "suppliers:execute"))
+
+@mcp.tool()
+def reconcile_supplier_creation(idempotency_key: str, ctx: Context) -> dict:
+    """Inspect possible supplier matches without repeating a write."""
+    principal(ctx, "suppliers:read")
+    return supplier_service().reconcile(idempotency_key)
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http" if os.environ.get("ERP_MCP_HTTP") == "true" else "stdio")
