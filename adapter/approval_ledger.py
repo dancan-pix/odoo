@@ -72,6 +72,15 @@ class ApprovalLedger:
                     return False
                 if db.execute("INSERT OR IGNORE INTO stock_release_claims VALUES (?,?)", (receipt, key)).rowcount != 1:
                     return False
+            if row[0] == "purchase_confirm":
+                order_id = json.loads(row[1])["id"]
+                if type(order_id) is not int or order_id <= 0:
+                    raise ValueError("Invalid purchase order identity")
+                # Serialize confirmations across different idempotency keys.
+                # Uncertain writes retain the claim until manual resolution.
+                prior = db.execute("SELECT payload_json FROM actions WHERE action='purchase_confirm' AND status IN ('executing','executed','uncertain')").fetchall()
+                if any(json.loads(item[0])["id"] == order_id for item in prior):
+                    return False
             db.execute("INSERT INTO execution_audit VALUES (?,?,?)",
                        (key, executor, datetime.now(timezone.utc).isoformat()))
             return db.execute("UPDATE actions SET status='executing' WHERE idempotency_key=? AND status='approved'", (key,)).rowcount == 1
