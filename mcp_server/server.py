@@ -148,5 +148,32 @@ def reconcile_stock_release(idempotency_key: str, ctx: Context) -> dict:
     ledger = ApprovalLedger(os.environ.get("ERP_APPROVAL_DB_PATH", "erp-approvals.sqlite3"))
     return StockTransferReconciler(OdooClient.from_env(), ledger).inspect(idempotency_key)
 
+
+def purchase_service():
+    from adapter.purchase_confirmation import PurchaseConfirmation
+    return PurchaseConfirmation(OdooClient.from_env(),
+        ApprovalLedger(os.environ.get("ERP_APPROVAL_DB_PATH", "erp-approvals.sqlite3")))
+
+@mcp.tool()
+def propose_purchase_confirmation(order_id: int, idempotency_key: str, ctx: Context) -> dict:
+    """Capture draft RFQ terms for independent approval."""
+    return purchase_service().propose(order_id, idempotency_key, principal(ctx, "purchase:propose"))
+
+@mcp.tool()
+def approve_purchase_confirmation(idempotency_key: str, ctx: Context) -> bool:
+    """Approve captured purchase terms as an independent principal."""
+    return purchase_service().approve(idempotency_key, principal(ctx, "purchase:approve"))
+
+@mcp.tool()
+def execute_purchase_confirmation(idempotency_key: str, ctx: Context) -> dict:
+    """Confirm an approved unchanged RFQ in the sandbox."""
+    return purchase_service().execute(idempotency_key, principal(ctx, "purchase:execute"))
+
+@mcp.tool()
+def reconcile_purchase_confirmation(idempotency_key: str, ctx: Context) -> dict:
+    """Inspect current Odoo state without retrying uncertain writes."""
+    principal(ctx, "purchase:read")
+    return purchase_service().reconcile(idempotency_key)
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http" if os.environ.get("ERP_MCP_HTTP") == "true" else "stdio")
