@@ -72,6 +72,15 @@ class ApprovalLedger:
                     return False
                 if db.execute("INSERT OR IGNORE INTO stock_release_claims VALUES (?,?)", (receipt, key)).rowcount != 1:
                     return False
+            if row[0] == "supplier_create":
+                payload = json.loads(row[1])
+                email = payload.get("email", "").strip().casefold()
+                name = payload.get("name", "").strip().casefold()
+                prior = db.execute("SELECT payload_json FROM actions WHERE action='supplier_create' AND status IN ('executing','executed','uncertain')").fetchall()
+                for item in prior:
+                    other = json.loads(item[0])
+                    if (email and email == other.get("email", "").strip().casefold()) or (name and name == other.get("name", "").strip().casefold()):
+                        return False
             if row[0] == "purchase_confirm":
                 order_id = json.loads(row[1])["id"]
                 if type(order_id) is not int or order_id <= 0:
