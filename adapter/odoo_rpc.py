@@ -38,14 +38,14 @@ class OdooClient:
             model, method, list(args), kwargs])
 
     def suppliers(self, limit: int = 50) -> list[dict]:
-        return self.execute("res.partner", "search_read", [[["supplier_rank", ">", 0]]],
+        return self.execute("res.partner", "search_read", [["supplier_rank", ">", 0]],
             fields=["id", "name", "email"], limit=min(max(limit, 1), 100))
 
     def purchase_orders(self, limit: int = 50) -> list[dict]:
-        return self.execute("purchase.order", "search_read", [[]],
+        return self.execute("purchase.order", "search_read", [],
             fields=["id", "name", "state", "partner_id", "date_order"], limit=min(max(limit, 1), 100))
 
     def stock_quantities(self, limit: int = 50) -> list[dict]:
-        return self.execute("stock.quant", "search_read", [[]],
+        return self.execute("stock.quant", "search_read", [],
             fields=["id", "product_id", "location_id", "quantity", "reserved_quantity"],
             limit=min(max(limit, 1), 100))
