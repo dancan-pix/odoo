@@ -202,5 +202,32 @@ def reconcile_supplier_creation(idempotency_key: str, ctx: Context) -> dict:
     principal(ctx, "suppliers:read")
     return supplier_service().reconcile(idempotency_key)
 
+
+def draft_purchase_service():
+    from adapter.draft_purchase import DraftPurchase
+    return DraftPurchase(OdooClient.from_env(),
+        ApprovalLedger(os.environ.get("ERP_APPROVAL_DB_PATH", "erp-approvals.sqlite3")))
+
+@mcp.tool()
+def propose_draft_purchase(supplier_id: int, lines: list[dict], idempotency_key: str, ctx: Context) -> dict:
+    """Propose an RFQ with product_id, quantity, unit_price and UTC planned_date per line."""
+    return draft_purchase_service().propose(supplier_id, lines, idempotency_key, principal(ctx, "purchase:propose"))
+
+@mcp.tool()
+def approve_draft_purchase(idempotency_key: str, ctx: Context) -> bool:
+    """Independently approve draft RFQ creation."""
+    return draft_purchase_service().approve(idempotency_key, principal(ctx, "purchase:approve"))
+
+@mcp.tool()
+def execute_draft_purchase(idempotency_key: str, ctx: Context) -> dict:
+    """Create an approved draft RFQ without confirming it."""
+    return draft_purchase_service().execute(idempotency_key, principal(ctx, "purchase:execute"))
+
+@mcp.tool()
+def reconcile_draft_purchase(idempotency_key: str, ctx: Context) -> dict:
+    """Inspect the deterministic RFQ reference without repeating a write."""
+    principal(ctx, "purchase:read")
+    return draft_purchase_service().reconcile(idempotency_key)
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http" if os.environ.get("ERP_MCP_HTTP") == "true" else "stdio")
