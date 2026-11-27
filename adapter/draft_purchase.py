@@ -49,7 +49,7 @@ class DraftPurchase:
 
     def matches(self, key):
         return self.client.execute("purchase.order", "search_read",
-            [[["partner_ref", "=", self.reference(key)]]],
+            [["partner_ref", "=", self.reference(key)]],
             fields=["id", "name", "state", "partner_id", "order_line"], limit=2)
 
     def execute(self, key, actor):
@@ -60,14 +60,14 @@ class DraftPurchase:
             return self.reconcile(key)
         payload = json.loads(row["payload_json"])
         supplier = self.client.execute("res.partner", "search_read",
-            [[["id", "=", payload["supplier_id"]], ["supplier_rank", ">", 0]]],
+            [["id", "=", payload["supplier_id"]], ["supplier_rank", ">", 0]],
             fields=["id"], limit=1)
         if not supplier:
             raise ValueError("Active supplier required")
         commands = []
         for line in payload["lines"]:
             products = self.client.execute("product.product", "search_read",
-                [[["id", "=", line["product_id"]], ["purchase_ok", "=", True]]],
+                [["id", "=", line["product_id"]], ["purchase_ok", "=", True]],
                 fields=["id", "display_name", "uom_po_id"], limit=1)
             if not products or not products[0]["uom_po_id"]:
                 raise ValueError("Purchasable product with purchase UOM required")
