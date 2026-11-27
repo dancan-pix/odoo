@@ -30,10 +30,10 @@ class SupplierCreation:
         return self.ledger.approve(key, actor)
 
     def matches(self, values):
-        domain = [["name", "=ilike", values["name"]]]
+        domain = [["name", "=ilike", values["name"]]
         if values["email"]:
-            domain = ["|", *domain, ["email", "=ilike", values["email"]]]
-        return self.client.execute("res.partner", "search_read", [domain],
+            domain = ["|", *domain, ["email", "=ilike", values["email"]]
+        return self.client.execute("res.partner", "search_read", domain,
             fields=["id", "name", "email", "supplier_rank"], limit=20,
             context={"active_test": False})
 
