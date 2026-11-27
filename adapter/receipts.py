@@ -8,7 +8,7 @@ class ReceiptReader:
     def incoming_receipts(self, limit: int = 50) -> list[dict]:
         return self.client.execute(
             "stock.picking", "search_read",
-            [[["picking_type_code", "=", "incoming"]]],
+            [["picking_type_code", "=", "incoming"]],
             fields=["id", "name", "origin", "state", "partner_id", "scheduled_date",
                     "location_id", "location_dest_id"],
             limit=min(max(limit, 1), 100))
@@ -18,7 +18,7 @@ class ReceiptReader:
             raise ValueError("Purchase order ID must be positive")
         return self.client.execute(
             "purchase.order.line", "search_read",
-            [[["order_id", "=", purchase_order_id]]],
+            [["order_id", "=", purchase_order_id]],
             fields=["id", "order_id", "product_id", "product_qty", "qty_received", "price_unit"],
             limit=200)
 
@@ -27,7 +27,7 @@ class ReceiptReader:
             raise ValueError("Picking ID must be positive")
         return self.client.execute(
             "stock.move", "search_read",
-            [[["picking_id", "=", picking_id]]],
+            [["picking_id", "=", picking_id]],
             fields=["id", "product_id", "product_uom_qty", "quantity", "state",
                     "location_id", "location_dest_id"],
             limit=200)
